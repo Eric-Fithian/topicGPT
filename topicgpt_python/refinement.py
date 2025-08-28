@@ -6,9 +6,19 @@ import traceback
 import argparse
 from topicgpt_python.utils import *
 from anytree import RenderTree
-from sentence_transformers import SentenceTransformer, util
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def _maybe_get_sbert():
+    try:
+        if "TRANSFORMERS_NO_TORCHVISION" not in os.environ:
+            os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
+        from sentence_transformers import SentenceTransformer, util as st_util
+
+        return SentenceTransformer("all-MiniLM-L6-v2"), st_util
+    except Exception:
+        return None, None
 
 
 def topic_pairs(topic_sent, all_pairs, threshold=0.5, num_pair=2):
@@ -26,15 +36,22 @@ def topic_pairs(topic_sent, all_pairs, threshold=0.5, num_pair=2):
     - list: List of all pairs prompted so far.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
-    embeddings = model.encode(topic_sent, convert_to_tensor=True)
-    cosine_scores = util.cos_sim(embeddings, embeddings).cpu()
-
-    pairs = [
-        {"index": [i, j], "score": cosine_scores[i][j].item()}
-        for i in range(len(cosine_scores))
-        for j in range(i + 1, len(cosine_scores))
-    ]
+    model, st_util = _maybe_get_sbert()
+    if model is None:
+        # Fallback: no embedding-based filtering; return first pairs
+        pairs = [
+            {"index": [i, j], "score": 1.0}
+            for i in range(len(topic_sent))
+            for j in range(i + 1, len(topic_sent))
+        ]
+    else:
+        embeddings = model.encode(topic_sent, convert_to_tensor=True)
+        cosine_scores = st_util.cos_sim(embeddings, embeddings).cpu()
+        pairs = [
+            {"index": [i, j], "score": cosine_scores[i][j].item()}
+            for i in range(len(cosine_scores))
+            for j in range(i + 1, len(cosine_scores))
+        ]
 
     pairs = sorted(pairs, key=lambda x: x["score"], reverse=True)
     selected_pairs = []
@@ -241,6 +258,8 @@ def refine_topics(
     verbose,
     remove,
     mapping_file,
+    base_url=None,
+    api_key=None,
 ):
     """
     Main function to refine topics by merging and updating based on API response.
@@ -260,7 +279,7 @@ def refine_topics(
     Returns:
     - None
     """
-    api_client = APIClient(api=api, model=model)
+    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
     topics_root = TopicTree().from_topic_list(topic_file, from_file=True)
     if verbose:
@@ -306,7 +325,9 @@ def refine_topics(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--api", type=str, help="API to use ('openai', 'vertex', 'vllm', 'gemini', 'azure')"
+        "--api",
+        type=str,
+        help="API to use ('openai', 'vertex', 'vllm', 'gemini', 'azure')",
     )
     parser.add_argument("--model", type=str, help="Model to use")
     parser.add_argument("--prompt_file", type=str, default="prompt/refinement.txt")
@@ -323,6 +344,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mapping_file", type=str, default="data/output/refiner_mapping.json"
     )
+    parser.add_argument("--base_url", type=str, default=None)
+    parser.add_argument("--api_key", type=str, default=None)
 
     args = parser.parse_args()
     refine_topics(
@@ -335,5 +358,7 @@ if __name__ == "__main__":
         args.updated_file,
         args.verbose,
         args.remove,
-        args.mapping_file
+        args.mapping_file,
+        args.base_url,
+        args.api_key,
     )

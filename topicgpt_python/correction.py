@@ -2,7 +2,7 @@ import pandas as pd
 import argparse
 import traceback
 from tqdm import tqdm
-from sentence_transformers import SentenceTransformer, util
+import os
 import regex as re
 import os
 from topicgpt_python.utils import *
@@ -10,7 +10,17 @@ from topicgpt_python.utils import *
 
 # Disable parallel tokenizers to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-sbert = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def _maybe_get_sbert():
+    try:
+        if "TRANSFORMERS_NO_TORCHVISION" not in os.environ:
+            os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
+        from sentence_transformers import SentenceTransformer, util as st_util
+
+        return SentenceTransformer("all-MiniLM-L6-v2"), st_util
+    except Exception:
+        return None, None
 
 
 def topic_parser(root_topics, df, verbose=False):
@@ -76,16 +86,32 @@ def correct(
             api_client.estimate_token_count(doc + correction_prompt + all_topics)
             > context_len
         ):
-            topic_embeddings = {
-                topic: sbert.encode(topic, convert_to_tensor=True)
-                for topic in all_topics.split("\n")
-            }
-            doc_embedding = sbert.encode(doc, convert_to_tensor=True)
-            top_topics = sorted(
-                topic_embeddings,
-                key=lambda t: util.cos_sim(topic_embeddings[t], doc_embedding).cpu(),
-                reverse=True,
-            )
+            sbert, st_util = _maybe_get_sbert()
+            if sbert is not None:
+                topic_embeddings = {
+                    topic: sbert.encode(topic, convert_to_tensor=True)
+                    for topic in all_topics.split("\n")
+                }
+                doc_embedding = sbert.encode(doc, convert_to_tensor=True)
+                top_topics = sorted(
+                    topic_embeddings,
+                    key=lambda t: st_util.cos_sim(
+                        topic_embeddings[t], doc_embedding
+                    ).cpu(),
+                    reverse=True,
+                )
+            else:
+                # Fallback: keep first N topics to fit context
+                top_topics = []
+                for t in all_topics.split("\n"):
+                    if (
+                        APIClient("openai", "gpt-4").estimate_token_count(
+                            "\n".join(top_topics + [t])
+                        )
+                        > context_len // 2
+                    ):
+                        break
+                    top_topics.append(t)
 
             while (
                 api_client.estimate_token_count("\n".join(top_topics))
@@ -99,7 +125,7 @@ def correct(
                 correction_prompt + all_topics
             )
             if api_client.estimate_token_count(doc) > max_doc_len:
-                doc = api_client.truncate(doc, max_doc_len)
+                doc = api_client.truncating(doc, max_doc_len)
 
         try:
             msg = f"Previously, this document was assigned to: {df.at[i, 'responses']}. Please reassign it to an existing topic in the hierarchy."
@@ -183,7 +209,15 @@ def correct_batch(
 
 
 def correct_topics(
-    api, model, data_path, prompt_path, topic_path, output_path, verbose=False
+    api,
+    model,
+    data_path,
+    prompt_path,
+    topic_path,
+    output_path,
+    verbose=False,
+    base_url=None,
+    api_key=None,
 ):
     """
     Main function to parse, correct, and save topic assignments.
@@ -197,7 +231,7 @@ def correct_topics(
     - output_path: Path to save corrected output
     - verbose: Print verbose output
     """
-    api_client = APIClient(api=api, model=model)
+    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.6, 0.9
     context_len = (
         128000
@@ -294,6 +328,8 @@ if __name__ == "__main__":
         help="Path to save corrected output",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--base_url", type=str, default=None)
+    parser.add_argument("--api_key", type=str, default=None)
     args = parser.parse_args()
 
     correct_topics(
@@ -304,4 +340,6 @@ if __name__ == "__main__":
         args.topic_path,
         args.output_path,
         args.verbose,
+        args.base_url,
+        args.api_key,
     )

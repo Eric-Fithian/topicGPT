@@ -7,20 +7,12 @@ from anytree import Node
 import traceback
 import subprocess
 
-from openai import OpenAI, AzureOpenAI
 import tiktoken
-from vllm import LLM, SamplingParams
-import vertexai
-from vertexai.generative_models import (
-    GenerationConfig,
-    GenerativeModel,
-    HarmBlockThreshold,
-    HarmCategory,
-    SafetySetting,
-)
-from anthropic import AnthropicVertex
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+
+# Avoid unnecessary torchvision import via transformers when not needed
+if "TRANSFORMERS_NO_TORCHVISION" not in os.environ:
+    os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
+# Delay optional cloud SDK imports to function scope to avoid import-time errors
 
 from sklearn import metrics
 import numpy as np
@@ -31,7 +23,7 @@ class APIClient:
     Prompting for OpenAI, VertexAI, and vLLM.
 
     Parameters:
-    - api: API type (e.g., 'openai', 'vertex', 'vllm')
+    - api: API type (e.g., 'openai', 'vertex', 'vllm', 'openai-compatible')
     - model: Model name
 
     Methods:
@@ -41,41 +33,64 @@ class APIClient:
     - batch_prompt: Batch prompting for vLLM API
     """
 
-    def __init__(self, api, model, host=None):
+    def __init__(self, api, model, host=None, base_url=None, api_key=None):
         self.api = api
         self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
         self.client = None
 
         # Setting API key ----
         if api == "openai":
+            from openai import OpenAI
+
             self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
         elif api == "vertex":
+            # Lazy import inside branch to avoid import-time heavy deps
+            import vertexai
+            from vertexai.generative_models import GenerativeModel
+
             vertexai.init(
                 project=os.environ["VERTEX_PROJECT"],
                 location=os.environ["VERTEX_LOCATION"],
             )
-            if model.startswith("gemini"): 
-                self.model_obj = genai.GenerativeModel(self.model)
-        elif api == "ollama": 
+            self.model_obj = GenerativeModel(self.model)
+        elif api == "ollama":
             self.client = OpenAI(
-                base_url = 'http://localhost:11434/v1',
-                api_key='ollama', # required, but unused
+                base_url="http://localhost:11434/v1",
+                api_key="ollama",  # required, but unused
             )
         elif api == "vllm":
+            # Lazy import to avoid pulling transformers/torchvision unless needed
+            from vllm import LLM as VLLM_LLM, SamplingParams as VLLM_SamplingParams
+
+            self.sampling_params_class = VLLM_SamplingParams
             self.hf_token = os.environ.get("HF_TOKEN")
-            self.llm = LLM(
+            self.llm = VLLM_LLM(
                 self.model,
                 download_dir=os.environ.get("HF_HOME", None),
             )
             self.tokenizer = self.llm.get_tokenizer()
-        elif api == "gemini": 
+        elif api == "gemini":
+            # Lazy import to avoid global import of google.generativeai
+            import google.generativeai as genai
+
             genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
             self.model_obj = genai.GenerativeModel(self.model)
-        elif api == "azure": 
+        elif api == "azure":
+            from openai import AzureOpenAI
+
             self.client = AzureOpenAI(
-            api_key = os.getenv("AZURE_OPENAI_API_KEY"),  
-            api_version = "2024-02-01",
-            azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                api_version="2024-02-01",
+                azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+            )
+        elif api == "openai-compatible":
+            from openai import OpenAI
+
+            self.client = OpenAI(
+                base_url=base_url,
+                api_key=api_key,
             )
         else:
             raise ValueError(
@@ -155,7 +170,7 @@ class APIClient:
 
         for attempt in range(num_try):
             try:
-                if self.api in ["openai", "azure", "ollama"]:
+                if self.api in ["openai", "azure", "ollama", "openai-compatible"]:
                     completion = self.client.chat.completions.create(
                         model=self.model,
                         messages=message,
@@ -177,7 +192,10 @@ class APIClient:
                     return completion.choices[0].message.content
 
                 elif self.api == "vertex":
+                    # Vertex can target either Claude via AnthropicVertex or Gemini via vertexai
                     if self.model.startswith("claude"):
+                        from anthropic import AnthropicVertex
+
                         client = AnthropicVertex(
                             region=os.environ["VERTEX_LOCATION"],
                             project_id=os.environ["VERTEX_PROJECT"],
@@ -205,6 +223,13 @@ class APIClient:
                             )
                         return text_content
                     else:
+                        from vertexai.generative_models import (
+                            GenerationConfig,
+                            HarmBlockThreshold,
+                            HarmCategory,
+                            SafetySetting,
+                        )
+
                         config = GenerationConfig(
                             max_output_tokens=max_tokens,
                             temperature=temperature,
@@ -242,9 +267,8 @@ class APIClient:
                             traceback.print_exc()
                             time.sleep(60)
 
-
                 elif self.api == "vllm":
-                    sampling_params = SamplingParams(
+                    sampling_params = self.sampling_params_class(
                         temperature=temperature,
                         top_p=top_p,
                         max_tokens=max_tokens,
@@ -260,22 +284,24 @@ class APIClient:
                     )
                     vllm_output = self.llm.generate([final_prompt], sampling_params)
                     return [output.outputs[0].text for output in vllm_output][0]
-                
+
                 elif self.api == "gemini":
+                    import google.generativeai as genai
+
                     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
                     self.model_obj = genai.GenerativeModel(self.model)
                     config = genai.types.GenerationConfig(
-                            max_output_tokens=max_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                        )
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                    )
                     # safety config
                     safety_config = {
-                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                          HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
-                          }
+                        genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                        genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                        genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                        genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                    }
                     try:
                         response = self.model_obj.generate_content(
                             system_message
@@ -319,7 +345,8 @@ class APIClient:
         if self.api != "vllm":
             raise ValueError("Batch prompting not supported for this API.")
 
-        sampling_params = SamplingParams(
+        sampling_params = self.sampling_params_class(
+            # only reachable when self.api == "vllm"
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
@@ -684,3 +711,20 @@ def calculate_metrics(true_col, pred_col, df):
     ari = metrics.adjusted_rand_score(df[true_col], df[pred_col])
     mis = metrics.normalized_mutual_info_score(df[true_col], df[pred_col])
     return (harmonic_purity, ari, mis)
+
+
+def csv_to_jsonl(csv_file, out_jsonl_file, id_col, text_col):
+    """
+    Convert a CSV file to a JSONL file with specified id and text columns.
+
+    Parameters:
+    - csv_file: Path to the input CSV file.
+    - out_jsonl_file: Path to the output JSONL file.
+    - id_col: Name of the column to use as the 'id' field.
+    - text_col: Name of the column to use as the 'text' field.
+    """
+    df = pd.read_csv(csv_file)
+    with open(out_jsonl_file, "w", encoding="utf-8") as fout:
+        for _, row in df.iterrows():
+            obj = {"id": str(row[id_col]), "text": str(row[text_col])}
+            fout.write(json.dumps(obj, ensure_ascii=False) + "\n")

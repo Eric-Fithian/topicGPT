@@ -3,16 +3,21 @@ You will receive a list of topics that belong to the same level of a topic hiera
 Here are some examples: 
 [Example 1]
 Topic List: 
-<pairs of similar topics>
+[1] Sports: Athletic competitions and physical activities
+[1] Athletics: Physical sports and competitive games
+[1] Entertainment: Movies, music, and leisure activities
 
 Your response: 
-<topics being merged into an existing topic>
+[1] Sports: Athletic competitions, physical activities, and competitive games ([1] Sports, [1] Athletics)
 
 [Example 2]
-<pairs of similar topics>
+Topic List: 
+[1] Technology: Digital innovations and computing
+[1] Tech: Modern technological developments
+[1] Science: Scientific research and discoveries
 
 Your response: 
-<topics being merged into a new topic>
+[1] Technology: Digital innovations, computing, and modern technological developments ([1] Technology, [1] Tech)
 
 [Rules]
 - Each line represents a topic, with a level indicator and a topic label. 

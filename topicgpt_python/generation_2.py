@@ -236,7 +236,16 @@ def generate_topics(
 
 
 def generate_topic_lvl2(
-    api, model, seed_file, data, prompt_file, out_file, topic_file, verbose
+    api,
+    model,
+    seed_file,
+    data,
+    prompt_file,
+    out_file,
+    topic_file,
+    verbose,
+    base_url=None,
+    api_key=None,
 ):
     """
     Generate subtopics for each top-level topic.
@@ -253,7 +262,7 @@ def generate_topic_lvl2(
 
     Returns: Root node of the topic tree
     """
-    api_client = APIClient(api=api, model=model)
+    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
 
     if verbose:
@@ -303,7 +312,9 @@ def generate_topic_lvl2(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--api", type=str, help="API to use ('openai', 'vertex', 'vllm', 'gemini', 'azure')"
+        "--api",
+        type=str,
+        help="API to use ('openai', 'vertex', 'vllm', 'gemini', 'azure')",
     )
     parser.add_argument("--model", type=str, help="Model to run topic generation with")
 
@@ -332,6 +343,8 @@ if __name__ == "__main__":
         help="Output topics file",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--base_url", type=str, default=None)
+    parser.add_argument("--api_key", type=str, default=None)
     args = parser.parse_args()
 
     generate_topic_lvl2(
@@ -343,4 +356,6 @@ if __name__ == "__main__":
         args.out_file,
         args.topic_file,
         args.verbose,
+        args.base_url,
+        args.api_key,
     )

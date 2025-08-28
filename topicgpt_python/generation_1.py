@@ -3,14 +3,24 @@ from topicgpt_python.utils import *
 from tqdm import tqdm
 import regex
 import traceback
-from sentence_transformers import SentenceTransformer, util
 import argparse
 import os
 from anytree import Node, RenderTree
 
 # Set environment variables
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-sbert = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def _maybe_get_sbert():
+    """Lazily import SentenceTransformer to avoid heavy deps at import-time."""
+    try:
+        if "TRANSFORMERS_NO_TORCHVISION" not in os.environ:
+            os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
+        from sentence_transformers import SentenceTransformer, util as st_util
+
+        return SentenceTransformer("all-MiniLM-L6-v2"), st_util
+    except Exception:
+        return None, None
 
 
 def prompt_formatting(
@@ -48,27 +58,37 @@ def prompt_formatting(
         else:  # Truncate topic list
             if verbose:
                 print(f"Too many topics ({topic_len} tokens). Pruning...")
-            cos_sim = {}
-            doc_emb = sbert.encode(doc, convert_to_tensor=True)
-            for top in topics_list:
-                top_emb = sbert.encode(top, convert_to_tensor=True)
-                cos_sim[top] = util.cos_sim(top_emb, doc_emb)
-            sim_topics = sorted(cos_sim, key=cos_sim.get, reverse=True)
+            sbert, st_util = _maybe_get_sbert()
+            if sbert is not None:
+                cos_sim = {}
+                doc_emb = sbert.encode(doc, convert_to_tensor=True)
+                for top in topics_list:
+                    top_emb = sbert.encode(top, convert_to_tensor=True)
+                    cos_sim[top] = st_util.cos_sim(top_emb, doc_emb)
+                sim_topics = sorted(cos_sim, key=cos_sim.get, reverse=True)
 
-            # Retaining only similar topics that fit within the context length
-            max_top_len = context_len - prompt_len - doc_len
-            seed_len, seed_str = 0, ""
-            while seed_len < max_top_len and sim_topics:
-                new_seed = sim_topics.pop(0)
-                if (
-                    seed_len + api_client.estimate_token_count(new_seed + "\n")
-                    > max_top_len
-                ):
-                    break
-                else:
+                # Retain only similar topics that fit within the context length
+                max_top_len = context_len - prompt_len - doc_len
+                seed_len, seed_str = 0, ""
+                while seed_len < max_top_len and sim_topics:
+                    new_seed = sim_topics.pop(0)
+                    token_count = api_client.estimate_token_count(new_seed + "\n")
+                    if seed_len + token_count > max_top_len:
+                        break
                     seed_str += new_seed + "\n"
-                    seed_len += api_client.estimate_token_count(seed_str)
-            prompt = generation_prompt.format(Document=doc, Topics=seed_str)
+                    seed_len += token_count
+                prompt = generation_prompt.format(Document=doc, Topics=seed_str)
+            else:
+                # Fallback: greedy pack topics until they fit
+                max_top_len = context_len - prompt_len - doc_len
+                seed_len, seed_str = 0, ""
+                for top in topics_list:
+                    token_count = api_client.estimate_token_count(top + "\n")
+                    if seed_len + token_count > max_top_len:
+                        break
+                    seed_str += top + "\n"
+                    seed_len += token_count
+                prompt = generation_prompt.format(Document=doc, Topics=seed_str)
     else:
         prompt = generation_prompt.format(Document=doc, Topics=topic_str)
     return prompt
@@ -151,7 +171,16 @@ def generate_topics(
 
 
 def generate_topic_lvl1(
-    api, model, data, prompt_file, seed_file, out_file, topic_file, verbose
+    api,
+    model,
+    data,
+    prompt_file,
+    seed_file,
+    out_file,
+    topic_file,
+    verbose,
+    base_url=None,
+    api_key=None,
 ):
     """
     Generate high-level topics
@@ -169,7 +198,7 @@ def generate_topic_lvl1(
     Returns:
     - topics_root (TopicTree): Root node of the topic tree
     """
-    api_client = APIClient(api=api, model=model)
+    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
 
     if verbose:
@@ -273,6 +302,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--verbose", type=bool, default=False, help="Whether to print out results"
     )
+    parser.add_argument("--base_url", type=str, default=None)
+    parser.add_argument("--api_key", type=str, default=None)
     args = parser.parse_args()
     generate_topic_lvl1(
         args.api,
@@ -283,4 +314,6 @@ if __name__ == "__main__":
         args.out_file,
         args.topic_file,
         args.verbose,
+        args.base_url,
+        args.api_key,
     )

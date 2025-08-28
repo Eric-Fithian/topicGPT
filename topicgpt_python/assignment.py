@@ -185,7 +185,17 @@ def assignment_batch(
     return responses, prompted_docs
 
 
-def assign_topics(api, model, data, prompt_file, out_file, topic_file, verbose):
+def assign_topics(
+    api,
+    model,
+    data,
+    prompt_file,
+    out_file,
+    topic_file,
+    verbose,
+    base_url=None,
+    api_key=None,
+):
     """
     Assign topics to a list of documents
 
@@ -198,7 +208,7 @@ def assign_topics(api, model, data, prompt_file, out_file, topic_file, verbose):
     - topic_file (str): File to write topics to
     - verbose (bool): Whether to print out results
     """
-    api_client = APIClient(api=api, model=model)
+    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
 
     if verbose:
@@ -297,7 +307,8 @@ if __name__ == "__main__":
         default="data/output/generation_1.md",
         help="File to write topics to",
     )
-
+    parser.add_argument("--base_url", type=str, default=None)
+    parser.add_argument("--api_key", type=str, default=None)
     parser.add_argument(
         "--verbose", type=bool, default=False, help="whether to print out results"
     )
@@ -311,4 +322,6 @@ if __name__ == "__main__":
         args.out_file,
         args.topic_file,
         args.verbose,
+        args.base_url,
+        args.api_key,
     )

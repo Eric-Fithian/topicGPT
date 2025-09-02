@@ -45,12 +45,14 @@ for seed_path in SEED_DIR.glob("*.md"):
     config["generation"] = {
         "prompt": str(PROMPT_DIR / "generation_1.txt"),
         "seed": str(seed_path),
-        "output": str(output_dir / "generation_1.jsonl"),
-        "topic_output": str(output_dir / "generation_1.md"),
+        "output": str(output_dir / "gen_1_raw_llm_resp.jsonl"),
+        "topic_output": str(output_dir / "gen_1_topic_list.md"),
+        "topic_output_csv": str(output_dir / "gen_1_topic_list.csv"),
     }
     config["assignment"] = {
         "prompt": str(PROMPT_DIR / "assignment.txt"),
-        "output_1": str(output_dir / "assignment_lvl1.jsonl"),
+        "output_1": str(output_dir / "ass_1_raw_llm_resp.jsonl"),
+        "topic_output_csv": str(output_dir / "ass_1_topic_assignments.csv"),
     }
     configs.append(config)
 

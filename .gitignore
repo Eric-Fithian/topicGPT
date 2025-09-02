@@ -148,3 +148,6 @@ static
 topic-gpt/tests/*
 
 test.ipynb
+
+data/input/
+data/output/

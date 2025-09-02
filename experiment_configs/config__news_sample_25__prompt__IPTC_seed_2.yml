@@ -4,13 +4,15 @@ api:
   base_url: http://localhost:1234/v1
   model: openai/gpt-oss-20b
 assignment:
-  output_1: data/output/news_sample_25__prompt__IPTC_seed_2/assignment_lvl1.jsonl
+  output_1: data/output/news_sample_25__prompt__IPTC_seed_2/ass_1_raw_llm_resp.jsonl
   prompt: prompt/assignment.txt
+  topic_output_csv: data/output/news_sample_25__prompt__IPTC_seed_2/ass_1_topic_assignments.csv
 config_id: news_sample_25__prompt__IPTC_seed_2
 data_sample: data/input/news_sample_25.jsonl
 generation:
-  output: data/output/news_sample_25__prompt__IPTC_seed_2/generation_1.jsonl
+  output: data/output/news_sample_25__prompt__IPTC_seed_2/gen_1_raw_llm_resp.jsonl
   prompt: prompt/generation_1.txt
   seed: data/pre_generated_topic_lists/seeds/IPTC_seed_2.md
-  topic_output: data/output/news_sample_25__prompt__IPTC_seed_2/generation_1.md
+  topic_output: data/output/news_sample_25__prompt__IPTC_seed_2/gen_1_topic_list.md
+  topic_output_csv: data/output/news_sample_25__prompt__IPTC_seed_2/gen_1_topic_list.csv
 verbose: true

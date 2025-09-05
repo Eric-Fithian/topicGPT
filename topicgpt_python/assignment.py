@@ -10,6 +10,8 @@ from sentence_transformers import SentenceTransformer, util
 import argparse
 import os
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sbert = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -24,34 +26,98 @@ def assignment(
     top_p,
     max_tokens,
     verbose,
+    # NEW:
+    concurrency: int = 8,
 ):
     """
     Return documents with topics assigned to them
-
-    Parameters:
-    - api_client: APIClient object
-    - topics_root: TopicTree object
-    - docs: list of documents
-    - assignment_prompt: str
-    - context_len: int
-    - temperature: float
-    - top_p: float
-    - max_tokens: int
+    ...
     - verbose: bool
-
-    Returns:
-    - res: list of responses
+    - concurrency: int  # NEW: number of concurrent API request threads (OpenAI/openai-compatible only)
     """
     tree_str = "\n".join(topics_root.to_topic_list(desc=True, count=False))
+    # keep names the same downstream:
     prompted_docs, res = [], []
 
+    # === NEW: concurrent path for OpenAI/openai-compatible ===
+    if concurrency > 1 and api_client.api in {"openai", "openai-compatible"}:
+        # preallocate in-order outputs
+        res = [None] * len(docs)
+        prompted_docs = [None] * len(docs)
+
+        def _worker(i: int):
+            doc = docs[i]
+            cos_sim = {}
+            doc_emb = sbert.encode(doc, convert_to_tensor=True)
+
+            # Same seed selection logic as before
+            if api_client.estimate_token_count(tree_str) > context_len:
+                for top in tree_str.split("\n"):
+                    top_emb = sbert.encode(top, convert_to_tensor=True)
+                    cos_sim[top] = util.cos_sim(top_emb, doc_emb).item()
+                top_top = sorted(cos_sim, key=cos_sim.get, reverse=True)
+
+                seed_len = 0
+                seed_str = ""
+                while seed_len < context_len and len(top_top) > 0:
+                    new_seed = top_top.pop(0)
+                    token_count = api_client.estimate_token_count(new_seed + "\n")
+                    if seed_len + token_count > context_len:
+                        break
+                    else:
+                        seed_str += new_seed + "\n"
+                        seed_len += token_count
+            else:
+                seed_str = tree_str
+
+            # Truncate doc
+            max_doc_len = (
+                context_len
+                - api_client.estimate_token_count(assignment_prompt)
+                - api_client.estimate_token_count(seed_str)
+            )
+            if api_client.estimate_token_count(doc) > max_doc_len:
+                if verbose:
+                    print(
+                        f"[{i}] Truncating document from "
+                        f"{api_client.estimate_token_count(doc)} to {max_doc_len}"
+                    )
+                doc_local = api_client.truncating(doc, max_doc_len)
+            else:
+                doc_local = doc
+
+            # Call API
+            try:
+                prompt = assignment_prompt.format(Document=doc_local, tree=seed_str)
+                response = api_client.iterative_prompt(
+                    prompt, max_tokens, temperature, top_p=top_p, verbose=verbose
+                )
+            except Exception:
+                traceback.print_exc()
+                response = "Error"
+
+            if verbose:
+                print(f"[{i}] Response: {response}\n--------------------")
+
+            # return index to keep original order
+            return i, response, doc_local
+
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_worker, i) for i in range(len(docs))]
+            for fut in as_completed(futures):
+                i, response, doc_local = fut.result()
+                res[i] = response
+                prompted_docs[i] = doc_local
+
+        return res, prompted_docs
+
+    # === ORIGINAL sequential path (unchanged) ===
+    prompted_docs, res = [], []
     for i in trange(len(docs)):
         doc = docs[i]
         cos_sim = {}
         doc_emb = sbert.encode(doc, convert_to_tensor=True)
 
-        # Include only most relevant topics such that the total length
-        # of tree_str is less than max_top_len
         if api_client.estimate_token_count(tree_str) > context_len:
             for top in tree_str.split("\n"):
                 top_emb = sbert.encode(top, convert_to_tensor=True)
@@ -67,14 +133,10 @@ def assignment(
                     break
                 else:
                     seed_str += new_seed + "\n"
-                    seed_len += (
-                        token_count  # Update only with the new topic's token count
-                    )
-
+                    seed_len += token_count
         else:
             seed_str = tree_str
 
-        # Truncate document if too long
         max_doc_len = (
             context_len
             - api_client.estimate_token_count(assignment_prompt)
@@ -92,8 +154,7 @@ def assignment(
                 prompt, max_tokens, temperature, top_p=top_p, verbose=verbose
             )
             res.append(response)
-        except Exception as e:
-            response = "Error"
+        except Exception:
             res.append("Error")
             traceback.print_exc()
 
@@ -101,6 +162,7 @@ def assignment(
             print(f"Response: {response}")
             print("--------------------")
         prompted_docs.append(doc)
+
     return res, prompted_docs
 
 
@@ -160,7 +222,7 @@ def assignment_batch(
                     break
                 else:
                     seed_str += new_seed + "\n"
-                    seed_len += api_client.estimate_token_count(seed_str)
+                    seed_len += api_client.estimate_token_count(new_seed + "\n")
         else:
             seed_str = tree_str
 
@@ -195,6 +257,7 @@ def assign_topics(
     verbose,
     base_url=None,
     api_key=None,
+    concurrency=8,
 ):
     """
     Assign topics to a list of documents
@@ -259,6 +322,7 @@ def assign_topics(
             top_p,
             max_tokens,
             verbose,
+            concurrency,
         )
 
     # Writing results ----

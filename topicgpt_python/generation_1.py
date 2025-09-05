@@ -1,11 +1,12 @@
-import pandas as pd
-from topicgpt_python.utils import *
-from tqdm import tqdm
-import regex
-import traceback
 import argparse
 import os
-from anytree import Node, RenderTree
+import traceback
+
+import pandas as pd
+import regex
+from tqdm import tqdm
+
+from topicgpt_python.utils import *  # noqa: F403
 
 # Set environment variables
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -37,10 +38,8 @@ def prompt_formatting(
     Format prompt to include document and seed topics.
     Handle cases where prompt is too long.
     """
-    # Load sentence transformer and calculate topic embeddings
-    topic_str = "\n".join(
-        [topic.split(":")[0].strip() for topic in topics_list]
-    )  # Get rid of description in the actual prompt
+    # Only pass the label (before ':') for seeds to keep prompt compact
+    topic_str = "\n".join([topic.split(":")[0].strip() for topic in topics_list])
 
     # Calculate length of document, seed topics, and prompt
     doc_len = api_client.estimate_token_count(doc)
@@ -65,33 +64,65 @@ def prompt_formatting(
                 for top in topics_list:
                     top_emb = sbert.encode(top, convert_to_tensor=True)
                     cos_sim[top] = st_util.cos_sim(top_emb, doc_emb)
+                # sort by cosine similarity (descending)
                 sim_topics = sorted(cos_sim, key=cos_sim.get, reverse=True)
 
                 # Retain only similar topics that fit within the context length
-                max_top_len = context_len - prompt_len - doc_len
+                max_top_len_actual = context_len - prompt_len - doc_len
                 seed_len, seed_str = 0, ""
-                while seed_len < max_top_len and sim_topics:
+                while seed_len < max_top_len_actual and sim_topics:
                     new_seed = sim_topics.pop(0)
                     token_count = api_client.estimate_token_count(new_seed + "\n")
-                    if seed_len + token_count > max_top_len:
+                    if seed_len + token_count > max_top_len_actual:
                         break
                     seed_str += new_seed + "\n"
                     seed_len += token_count
                 prompt = generation_prompt.format(Document=doc, Topics=seed_str)
             else:
                 # Fallback: greedy pack topics until they fit
-                max_top_len = context_len - prompt_len - doc_len
+                max_top_len_actual = context_len - prompt_len - doc_len
                 seed_len, seed_str = 0, ""
                 for top in topics_list:
                     token_count = api_client.estimate_token_count(top + "\n")
-                    if seed_len + token_count > max_top_len:
+                    if seed_len + token_count > max_top_len_actual:
                         break
                     seed_str += top + "\n"
                     seed_len += token_count
                 prompt = generation_prompt.format(Document=doc, Topics=seed_str)
     else:
         prompt = generation_prompt.format(Document=doc, Topics=topic_str)
+
     return prompt
+
+
+# Robust topic line regex:
+# - multi-line, optional leading bullets/whitespace
+# - [level]  label : description
+TOPIC_RE = regex.compile(
+    r"""
+    (?m)                    # multi-line mode
+    ^\s*                    # leading spaces
+    (?:[-*]\s*)?            # optional list bullet
+    \[(\d+)\]\s*            # [level]
+    ([^:\n\[\]]+?)\s*       # label (anything up to colon; exclude brackets/newlines/colon)
+    :\s*
+    ([^\n]+?)\s*            # description (rest of the line)
+    $                       # end of line
+    """,
+    regex.VERBOSE | regex.UNICODE,
+)
+
+
+def parse_topics(response: str):
+    """Return list of (level:int, label:str, desc:str) parsed from a model response."""
+    out = []
+    for lvl_s, name, desc in TOPIC_RE.findall(response):
+        lvl = int(lvl_s)
+        name = name.strip()
+        desc = desc.strip()
+        if name and desc:
+            out.append((lvl, name, desc))
+    return out
 
 
 def generate_topics(
@@ -106,14 +137,13 @@ def generate_topics(
     max_tokens,
     top_p,
     verbose,
-    early_stop=100,  # Modify this parameter to control early stopping
+    early_stop=50,  # Modify this parameter to control early stopping
 ):
     """
     Generate topics from documents using LLMs.
     """
     responses = []
-    running_dups = 0
-    topic_format = regex.compile(r"^\[(\d+)\] ([\w\s]+):(.+)")
+    docs_since_new_topic = 0
 
     for i, doc in enumerate(tqdm(docs)):
         prompt = prompt_formatting(
@@ -127,42 +157,54 @@ def generate_topics(
         )
 
         try:
-            response = api_client.iterative_prompt(
+            added_new_topic = False
+            response = api_client.iterative_prompt(  # noqa: F405
                 prompt, max_tokens, temperature, top_p=top_p, verbose=verbose
             )
 
-            # Parsing topics and organizing topic tree
-            topics = [t.strip() for t in response.split("\n")]
-            for t in topics:
-                if not regex.match(topic_format, t):
-                    print(f"Invalid topic format: {t}. Skipping...")
-                    continue
-                groups = regex.match(topic_format, t)
-                lvl, name, desc = int(groups[1]), groups[2].strip(), groups[3].strip()
+            # Parse all valid topic lines from the whole response
+            matches = parse_topics(response)
 
+            if not matches and verbose:
+                print(f"No parsable topics in response:\n{response}\n")
+
+            for lvl, name, desc in matches:
                 if lvl != 1:
-                    print(f"Lower level topics are not allowed: {t}. Skipping...")
+                    if verbose:
+                        print(
+                            f"Lower level topics are not allowed: [{lvl}] {name}: {desc}. Skipping..."
+                        )
                     continue
-                dups = topics_root.find_duplicates(name, lvl)
 
-                if (
-                    dups
-                ):  # Implement early stopping if no new topics are generated for a while
+                dups = topics_root.find_duplicates(name, lvl)
+                if dups:
                     dups[0].count += 1
-                    running_dups += 1
-                    if running_dups > early_stop:
-                        return responses, topics_list, topics_root
                 else:
                     topics_root._add_node(lvl, name, 1, desc, topics_root.root)
                     topics_list = topics_root.to_topic_list(desc=False, count=False)
-                    running_dups = 0
+                    added_new_topic = True
+
+            if added_new_topic:
+                docs_since_new_topic = 0
+            else:
+                docs_since_new_topic += 1
+            if docs_since_new_topic >= early_stop:
+                if verbose:
+                    print(
+                        f"Early stop triggered: {docs_since_new_topic} consecutive documents without new topics."
+                    )
+                return responses, topics_list, topics_root
 
             if verbose:
                 print(f"Topics: {response}")
                 print("--------------------")
             responses.append(response)
 
-        except Exception as e:
+        except KeyboardInterrupt:
+            # Preserve progress cleanly on manual interrupt
+            responses.append("Interrupted")
+            break
+        except Exception:
             traceback.print_exc()
             responses.append("Error")
             break
@@ -184,21 +226,12 @@ def generate_topic_lvl1(
 ):
     """
     Generate high-level topics
-
-    Parameters:
-    - api (str): API to use ('openai', 'vertex', 'vllm', 'azure', 'gemini')
-    - model (str): Model to use
-    - data (str): Data file
-    - prompt_file (str): File to read prompts from
-    - seed_file (str): Markdown file to read seed topics from
-    - out_file (str): File to write results to
-    - topic_file (str): File to write topics to
-    - verbose (bool): Whether to print out results
-
     Returns:
     - topics_root (TopicTree): Root node of the topic tree
     """
-    api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
+    api_client = APIClient(
+        api=api, model=model, base_url=base_url, api_key=api_key
+    )  # noqa: F405
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
 
     if verbose:
@@ -223,8 +256,9 @@ def generate_topic_lvl1(
     # Load data
     df = pd.read_json(data, lines=True)
     docs = df["text"].tolist()
-    generation_prompt = open(prompt_file, "r").read()
-    topics_root = TopicTree().from_seed_file(seed_file)
+    with open(prompt_file, "r") as f:
+        generation_prompt = f.read()
+    topics_root = TopicTree().from_seed_file(seed_file)  # noqa: F405
     topics_list = topics_root.to_topic_list(desc=True, count=False)
 
     # Generate topics
@@ -249,9 +283,11 @@ def generate_topic_lvl1(
         df = df.iloc[: len(responses)]
         df["responses"] = responses
         df.to_json(out_file, lines=True, orient="records")
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
-        with open(f"data/output/generation_1_backup_{model}.txt", "w") as f:
+        # Keep a plain-text backup if JSONL write fails
+        backup_path = f"data/output/generation_1_backup_{model}.txt"
+        with open(backup_path, "w") as f:
             for line in responses:
                 print(line, file=f)
 

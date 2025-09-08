@@ -12,6 +12,8 @@ import os
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from tqdm.std import tqdm
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sbert = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -104,7 +106,13 @@ def assignment(
 
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
             futures = [ex.submit(_worker, i) for i in range(len(docs))]
-            for fut in as_completed(futures):
+            for fut in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Assigning topics",
+                unit="doc",
+                leave=True,
+            ):
                 i, response, doc_local = fut.result()
                 res[i] = response
                 prompted_docs[i] = doc_local
@@ -258,6 +266,8 @@ def assign_topics(
     base_url=None,
     api_key=None,
     concurrency=8,
+    sample_size=None,
+    sample_seed=None,
 ):
     """
     Assign topics to a list of documents
@@ -270,6 +280,9 @@ def assign_topics(
     - out_file (str): Output file
     - topic_file (str): File to write topics to
     - verbose (bool): Whether to print out results
+    - concurrency (int): Number of concurrent API requests
+    - sample_size (int): Number of documents to sample from the data. If None, all documents are used.
+    - sample_seed (int): Seed for the random number generator. If None, a random seed is used.
     """
     api_client = APIClient(api=api, model=model, base_url=base_url, api_key=api_key)
     max_tokens, temperature, top_p = 1000, 0.0, 1.0
@@ -294,6 +307,8 @@ def assign_topics(
 
     # Load data ----
     df = pd.read_json(data, lines=True)
+    if sample_size is not None:
+        df = df.sample(sample_size, random_state=sample_seed)
     docs = df["text"].tolist()
     assignment_prompt = open(prompt_file, "r").read()
     topics_root = TopicTree().from_topic_list(topic_file, from_file=True)

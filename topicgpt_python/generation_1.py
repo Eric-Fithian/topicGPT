@@ -188,6 +188,8 @@ def generate_topics(
                 docs_since_new_topic = 0
             else:
                 docs_since_new_topic += 1
+                if verbose:
+                    print(f"Docs since new topic: {docs_since_new_topic}/{early_stop}")
             if docs_since_new_topic >= early_stop:
                 if verbose:
                     print(
@@ -223,6 +225,7 @@ def generate_topic_lvl1(
     verbose,
     base_url=None,
     api_key=None,
+    early_stop=50,
 ):
     """
     Generate high-level topics
@@ -274,6 +277,7 @@ def generate_topic_lvl1(
         max_tokens,
         top_p,
         verbose,
+        early_stop,
     )
 
     # Save generated topics
